@@ -67,3 +67,23 @@ jobs:
             -H "Content-Type: application/json" `
             --data-binary "@$path"
           Write-Host ($out -join "`n")
+
+      # Topics drive GitHub search and are picked up by agents that query GitHub.
+      # GITHUB_TOKEN has contents:write, which is enough for the topics endpoint.
+      - name: Set repository topics
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $body = '{"names":["windows","launcher","csharp","productivity","lightweight","alt-space","app-launcher","windows-11","dotnet-framework"]}'
+          $path = Join-Path $env:RUNNER_TEMP 'topics.json'
+          [System.IO.File]::WriteAllText($path, $body, (New-Object System.Text.UTF8Encoding($false)))
+          $out = & curl.exe -s -w "`nHTTP:%{http_code}" -X PUT `
+            "https://api.github.com/repos/${{ github.repository }}/topics" `
+            -H "Authorization: Bearer $env:GH_TOKEN" `
+            -H "Accept: application/vnd.github+json" `
+            -H "User-Agent: ci" `
+            -H "Content-Type: application/json" `
+            --data-binary "@$path"
+          Write-Host ($out -join "`n")
