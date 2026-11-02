@@ -42,15 +42,16 @@ jobs:
           generate_release_notes: true
 
       # Optional: keeps the repository description in sync.
-      # GITHUB_TOKEN cannot edit repository metadata (needs Administration permission),
-      # so this only runs when a PAT with `administration: write` is stored as REPO_PAT.
-      # The text travels as base64 on purpose: PowerShell 5.1 decodes BOM-less UTF-8
-      # scripts as ANSI, which mangles CJK.
+      # GITHUB_TOKEN cannot edit repository metadata (it needs Administration permission),
+      # so this only runs when a PAT with administration:write is stored as the REPO_PAT secret.
+      # The text travels as base64 on purpose: PowerShell 5.1 decodes BOM-less UTF-8 scripts as
+      # ANSI, which used to mangle CJK and produced mojibake in the description.
       - name: Sync repository description
-        if: ${{ secrets.REPO_PAT != '' }}
+        if: env.REPO_PAT != ''
         continue-on-error: true
         shell: pwsh
         env:
+          REPO_PAT: ${{ secrets.REPO_PAT }}
           DESC_B64: QWx0K1NwYWNlIOaegeeugCBXaW5kb3dzIOW6lOeUqOWQr+WKqOWZqO+9nOWNleaWh+S7tiA3NktC77yM5peg56ys5LiJ5pa55L6d6LWW
         run: |
           $desc = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:DESC_B64))
@@ -60,7 +61,7 @@ jobs:
 
           $out = & curl.exe -s -w "`nHTTP:%{http_code}" -X PATCH `
             "https://api.github.com/repos/${{ github.repository }}" `
-            -H "Authorization: Bearer ${{ secrets.REPO_PAT }}" `
+            -H "Authorization: Bearer $env:REPO_PAT" `
             -H "Accept: application/vnd.github+json" `
             -H "User-Agent: ci" `
             -H "Content-Type: application/json" `
