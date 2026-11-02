@@ -131,7 +131,8 @@ namespace QuickStart
         public double WidthRatio = 0.47;
         public bool MatchPath = true;
         public bool ScanProgramFiles = true;
-        public bool IconWell = true;
+        public bool IconWell = false;
+        public int IconSize = 13;      // 图标边长（逻辑像素）
 
         private const string Template =
             "# QuickStart 配置\r\n" +
@@ -155,7 +156,10 @@ namespace QuickStart
             "ScanProgramFiles=true\r\n" +
             "\r\n" +
             "# 图标是否加一层极淡的圆角底片（让形状各异的图标看起来更整齐；true/false）\r\n" +
-            "IconWell=true\r\n";
+            "IconWell=false\r\n" +
+            "\r\n" +
+            "# 图标边长（逻辑像素），10-28\r\n" +
+            "IconSize=13\r\n";
 
         public static Config Load(string path)
         {
@@ -192,6 +196,10 @@ namespace QuickStart
                         case "matchpath": c.MatchPath = Truthy(v); break;
                         case "scanprogramfiles": c.ScanProgramFiles = Truthy(v); break;
                         case "iconwell": c.IconWell = Truthy(v); break;
+                        case "iconsize":
+                            int sz;
+                            if (int.TryParse(v, out sz) && sz >= 10 && sz <= 28) c.IconSize = sz;
+                            break;
                     }
                 }
             }
@@ -1137,7 +1145,8 @@ namespace QuickStart
         private Font _fontInput, _fontItem, _fontHint, _fontMono;
         private Theme _theme;
         private Brush _brBg, _brCard, _brText, _brSub, _brSel, _brAccent, _brSelBorder, _brTile;
-        private bool _softWell = true;      // 图标是否加"极淡底片"，来自 config.ini 的 IconWell
+        private bool _softWell = false;     // 图标是否加"极淡底片"，来自 config.ini 的 IconWell
+        private int _iconSize = 13;         // 图标边长，来自 config.ini 的 IconSize
         private Pen _penBorder, _penAccent, _penSelBorder, _penTile;
         private double _scale = 1.0;
         private List<AppEntry> _results = new List<AppEntry>(40);
@@ -1182,7 +1191,8 @@ namespace QuickStart
             AutoScaleMode = AutoScaleMode.None;
             Text = "QuickStart";
 
-            _softWell = Program.Cfg == null || Program.Cfg.IconWell;
+            _softWell = Program.Cfg != null && Program.Cfg.IconWell;
+            _iconSize = Program.Cfg == null ? 13 : Program.Cfg.IconSize;
             ApplyTheme(Theme.Create(Program.Cfg == null || Program.Cfg.Dark));
             _fontInput = MakeFont(17.5f);
             _fontItem = MakeFont(13.5f);
@@ -1355,7 +1365,7 @@ namespace QuickStart
             _normalRows = rows;
             _maxRows = rows;
 
-            _box.SetBounds(sidePad + D(22), pad + (inputH - _box.PreferredHeight) / 2, w - sidePad * 2 - D(22), _box.PreferredHeight);
+            _box.SetBounds(sidePad + D(30), pad + (inputH - _box.PreferredHeight) / 2, w - sidePad * 2 - D(30), _box.PreferredHeight);
 
             using (GraphicsPath path = Round(ClientRectangle, D(12)))
                 Region = new Region(path);
@@ -1813,25 +1823,28 @@ namespace QuickStart
             if (_sw.ElapsedMilliseconds >= 3) AppLog.LogPaint(_sw.ElapsedMilliseconds, _results.Count);
         }
 
-        /// <summary>输入框左侧的放大镜。对齐基准取文本框自身的垂直中线，而不是估一个魔法数字。</summary>
+        /// <summary>
+        /// 输入框左侧的放大镜。
+        /// 尺寸刻意和列表图标对齐（13px），笔触也压细压暗——它只是提示"这里是搜索框"，
+        /// 不应该比输入文字本身更抢眼。
+        /// </summary>
         private void DrawInputGlyph(Graphics g)
         {
             if (_cmdMode) return;   // 命令模式输入框本身以 > 开头，不再重复画
 
-            int dia = D(17);                          // 圆直径（与文字大写高度大致相当）
-            int handle = D(4);                        // 手柄长度（右下 45°）
-            int cx = D(16) + dia / 2;
-
-            // 圆心对齐文字中线：手柄本身就是向右下溢出的，把它算进居中反而会把圆顶高一截
+            int dia = D(13);
+            int left = D(22);                                  // 与列表图标同一列
             int cy = _box.Top + _box.Height / 2;
+            int handle = Math.Max(2, (int)Math.Round(dia * 0.30f));
 
-            var circle = new Rectangle(cx - dia / 2, cy - dia / 2, dia, dia);
-            float w = Math.Max(1.3f, (float)_scale * 1.25f);
-            using (var pen = new Pen(_theme.Sub, w))
+            var circle = new Rectangle(left, cy - dia / 2, dia, dia);
+            float w = Math.Max(1.05f, (float)_scale * 1.0f);   // 细笔触
+
+            using (var pen = new Pen(_theme.Hint, w))
             {
                 g.DrawEllipse(pen, circle);
-                int x1 = (int)(circle.Right - dia * 0.16);
-                int y1 = (int)(circle.Bottom - dia * 0.16);
+                int x1 = circle.Right - (int)(dia * 0.13);
+                int y1 = circle.Bottom - (int)(dia * 0.13);
                 g.DrawLine(pen, x1, y1, x1 + handle, y1 + handle);
             }
         }
@@ -1886,7 +1899,7 @@ namespace QuickStart
             }
 
             // 裸图标，不加底框：Raycast / PowerToys Run / Win11 开始菜单都是这么做的。
-            int iconSize = D(18);
+            int iconSize = D(_iconSize);
             int ix = row.Left + D(10);
             int iy = row.Top + (row.Height - iconSize) / 2;
 
@@ -1900,7 +1913,12 @@ namespace QuickStart
             Bitmap icon = _host.Icons.GetSized(entry.IconKey, iconSize);
             if (icon != null)
             {
+                // 圆角裁剪：整块方形的图标（便签、封面）不再是一个硬边色块，视觉上"瘦"一圈
+                GraphicsState st = g.Save();
+                using (GraphicsPath cp = Round(new Rectangle(ix, iy, iconSize, iconSize), Math.Max(2, iconSize / 4)))
+                    g.SetClip(cp, CombineMode.Intersect);
                 g.DrawImageUnscaled(icon, ix, iy);
+                g.Restore(st);
             }
             else
             {
@@ -1911,7 +1929,7 @@ namespace QuickStart
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
             }
 
-            int tx = ix + iconSize + D(12);
+            int tx = ix + iconSize + D(11);
             int tw = row.Right - tx - D(56);
             TextRenderer.DrawText(g, entry.Name, _fontItem, new Rectangle(tx, row.Top, tw, row.Height), _theme.Text,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
