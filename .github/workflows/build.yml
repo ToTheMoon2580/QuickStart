@@ -40,3 +40,28 @@ jobs:
         with:
           files: QuickStart.exe
           generate_release_notes: true
+
+      # Keeps the repository description in sync. The text travels as base64 on purpose:
+      # PowerShell 5.1 decodes BOM-less UTF-8 scripts as ANSI, which used to mangle CJK.
+      - name: Sync repository description
+        continue-on-error: true
+        shell: pwsh
+        env:
+          DESC_B64: QWx0K1NwYWNlIOaegeeugCBXaW5kb3dzIOW6lOeUqOWQr+WKqOWZqO+9nOWNleaWh+S7tiA3NktC77yM5peg56ys5LiJ5pa55L6d6LWW
+        run: |
+          $desc = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:DESC_B64))
+          $body = @{ description = $desc } | ConvertTo-Json -Compress
+          $path = Join-Path $env:RUNNER_TEMP 'desc.json'
+          [System.IO.File]::WriteAllText($path, $body, (New-Object System.Text.UTF8Encoding($false)))
+
+          $out = & curl.exe -s -w "`nHTTP:%{http_code}" -X PATCH `
+            "https://api.github.com/repos/${{ github.repository }}" `
+            -H "Authorization: Bearer $($env:GITHUB_TOKEN)" `
+            -H "Accept: application/vnd.github+json" `
+            -H "User-Agent: ci" `
+            -H "Content-Type: application/json" `
+            --data-binary "@$path"
+          $body_text = ($out -join "`n")
+          Write-Host $body_text
+          $code = [int](($body_text -split 'HTTP:')[-1].Trim())
+          if ($code -ge 400) { Write-Warning "description update rejected: HTTP $code" }
