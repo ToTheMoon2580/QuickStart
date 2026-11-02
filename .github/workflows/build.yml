@@ -41,9 +41,13 @@ jobs:
           files: QuickStart.exe
           generate_release_notes: true
 
-      # Keeps the repository description in sync. The text travels as base64 on purpose:
-      # PowerShell 5.1 decodes BOM-less UTF-8 scripts as ANSI, which used to mangle CJK.
+      # Optional: keeps the repository description in sync.
+      # GITHUB_TOKEN cannot edit repository metadata (needs Administration permission),
+      # so this only runs when a PAT with `administration: write` is stored as REPO_PAT.
+      # The text travels as base64 on purpose: PowerShell 5.1 decodes BOM-less UTF-8
+      # scripts as ANSI, which mangles CJK.
       - name: Sync repository description
+        if: ${{ secrets.REPO_PAT != '' }}
         continue-on-error: true
         shell: pwsh
         env:
@@ -56,12 +60,9 @@ jobs:
 
           $out = & curl.exe -s -w "`nHTTP:%{http_code}" -X PATCH `
             "https://api.github.com/repos/${{ github.repository }}" `
-            -H "Authorization: Bearer $($env:GITHUB_TOKEN)" `
+            -H "Authorization: Bearer ${{ secrets.REPO_PAT }}" `
             -H "Accept: application/vnd.github+json" `
             -H "User-Agent: ci" `
             -H "Content-Type: application/json" `
             --data-binary "@$path"
-          $body_text = ($out -join "`n")
-          Write-Host $body_text
-          $code = [int](($body_text -split 'HTTP:')[-1].Trim())
-          if ($code -ge 400) { Write-Warning "description update rejected: HTTP $code" }
+          Write-Host ($out -join "`n")
