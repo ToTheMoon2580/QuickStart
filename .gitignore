@@ -1,0 +1,17 @@
+# 编译产物
+dist/
+build/*.exe
+build/*.xml
+
+# 运行时生成
+*.log
+cache.tsv
+
+# 开发期截图（docs/ 里的是要提交的）
+shots/
+
+# 系统
+Thumbs.db
+desktop.ini
+.vs/
+*.user
