@@ -101,7 +101,7 @@ powershell -ExecutionPolicy Bypass -File build\install.ps1
 | 机制 | 说明 |
 | --- | --- |
 | HKCU `Run` 项 | 登录后立即启动，不需要管理员权限 |
-| 计划任务 `QuickStart` | 每 5 分钟检查一次，进程不在就拉起 |
+| 计划任务 `QuickStart` | 每 2 分钟检查一次，进程不在就拉起 |
 
 计划任务本身不常驻内存：每次只是启动一个 `--ensure` 进程，发现已在运行就在 ~30 ms 内静默退出，
 不弹窗口、不抢焦点。

@@ -2473,8 +2473,11 @@ namespace QuickStart
             _tray.Icon = _trayIcon;
             _tray.Text = "QuickStart — 极简启动器";
             _tray.Visible = true;
-            _tray.DoubleClick += delegate { Ui.Toggle(); };
-            _tray.MouseUp += delegate (object s, MouseEventArgs e) { if (e.Button == MouseButtons.Right) ShowTrayMenu(); };
+            _tray.MouseUp += delegate (object s, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left) Ui.Toggle();   // 单击左键呼出
+                else if (e.Button == MouseButtons.Right) ShowTrayMenu();
+            };
         }
 
         private void ShowTrayMenu()
@@ -2625,7 +2628,14 @@ namespace QuickStart
         {
             if (m.Msg == Native.WM_HOTKEY && (int)m.WParam == 1) { Ui.Toggle(); m.Result = IntPtr.Zero; return; }
             if (m.Msg == Native.WM_QS_TOGGLE) { Ui.Toggle(); m.Result = IntPtr.Zero; return; }
-            if (m.Msg == Native.WM_CLOSE) { Exiting = true; Application.Exit(); m.Result = IntPtr.Zero; return; }
+            if (m.Msg == Native.WM_CLOSE)
+            {
+                // 只记录，不退出：某些清理工具会向所有顶层窗口发 WM_CLOSE，
+                // 以前会把整个启动器关掉。真正的退出只走托盘菜单 / --quit。
+                AppLog.W("收到外部 WM_CLOSE，已忽略");
+                m.Result = IntPtr.Zero;
+                return;
+            }
             base.WndProc(ref m);
         }
 
@@ -2917,13 +2927,13 @@ namespace QuickStart
 
             string output;
             int code = TryRunSchtasks(
-                "/Create /TN \"QuickStart\" /TR \"\\\"" + exe + "\\\" --ensure\" /SC MINUTE /MO 5 /F",
+                "/Create /TN \"QuickStart\" /TR \"\\\"" + exe + "\\\" --ensure\" /SC MINUTE /MO 2 /F",
                 out output);
 
             bool ok = code == 0;
             AppLog.W("计划任务 QuickStart -> " + (ok ? "已创建" : "失败(" + code + "): " + output));
             Console.WriteLine(ok
-                ? "计划任务已创建：每 5 分钟检查一次，掉线自动拉起"
+                ? "计划任务已创建：每 2 分钟检查一次，掉线自动拉起"
                 : "计划任务创建失败: " + output);
             return ok ? 0 : 1;
         }
