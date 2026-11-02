@@ -45,6 +45,7 @@ namespace QuickStart
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuickStart");
 
         public static readonly string ConfigPath = Path.Combine(InstallDir, "config.ini");
+        public static readonly string HistoryPath = Path.Combine(InstallDir, "history.tsv");
 
         public static Config Cfg;
 
@@ -446,6 +447,15 @@ namespace QuickStart
             return new RECT { Left = wa.Left, Top = wa.Top, Right = wa.Right, Bottom = wa.Bottom };
         }
 
+        [DllImport("user32.dll")]
+        public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_SHOWWINDOW = 0x0040;
+
         public static void ForceForeground(IntPtr h)
         {
             if (GetForegroundWindow() == h) return;
@@ -459,6 +469,17 @@ namespace QuickStart
                 SetForegroundWindow(h);
                 AttachThreadInput(self, target, false);
             }
+        }
+
+        /// <summary>
+        /// 重新压回最顶层。窗口的 WS_EX_TOPMOST 会被系统或别的程序摘掉
+        /// （实测被另一个常驻窗口盖住后 TopMost 属性还在、扩展样式已经没了），
+        /// 所以每次显示都主动重设一次，而不是只在构造函数里设 TopMost。
+        /// </summary>
+        public static void KeepTopMost(IntPtr h)
+        {
+            try { SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW); }
+            catch { }
         }
     }
 
@@ -730,6 +751,14 @@ namespace QuickStart
         private readonly Dictionary<string, List<AppEntry>> _queryCache =
             new Dictionary<string, List<AppEntry>>(StringComparer.Ordinal);
 
+        // 使用记录：每个软件被打开的次数和最后一次的时间，用于"空查询"按使用频率排序
+        private readonly Dictionary<string, int> _useCount =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, long> _useLast =
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private readonly object _useSync = new object();
+        private string _historyPath;
+
         public event Action Completed;
 
         public int Count { get { lock (_sync) return _entries.Count; } }
@@ -739,6 +768,102 @@ namespace QuickStart
         public List<AppEntry> Snapshot()
         {
             lock (_sync) return _entries;
+        }
+
+        private static string KeyOf(AppEntry e)
+        {
+            string k = e.Target;
+            if (string.IsNullOrEmpty(k)) k = e.Name;
+            return (k ?? "").ToLowerInvariant();
+        }
+
+        private int UseCount(AppEntry e)
+        {
+            lock (_useSync)
+            {
+                int c;
+                return _useCount.TryGetValue(KeyOf(e), out c) ? c : 0;
+            }
+        }
+
+        private long UseLast(AppEntry e)
+        {
+            lock (_useSync)
+            {
+                long v;
+                return _useLast.TryGetValue(KeyOf(e), out v) ? v : 0L;
+            }
+        }
+
+        public void LoadHistory(string path)
+        {
+            _historyPath = path;
+            try
+            {
+                if (!File.Exists(path)) return;
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    if (line.Length == 0) continue;
+                    string[] p = line.Split('\t');
+                    if (p.Length < 3) continue;
+                    int c;
+                    long ticks;
+                    if (!int.TryParse(p[0], out c) || c <= 0) continue;
+                    if (!long.TryParse(p[1], out ticks)) continue;
+                    string key = p[2];
+                    if (key.Length == 0) continue;
+                    lock (_useSync)
+                    {
+                        _useCount[key] = c;
+                        _useLast[key] = ticks;
+                    }
+                }
+                AppLog.W("使用记录已载入 " + _useCount.Count + " 条");
+            }
+            catch (Exception ex) { AppLog.W("读取使用记录失败: " + ex.Message); }
+        }
+
+        /// <summary>记录一次启动。写盘放到后台线程，不阻塞界面。</summary>
+        public void RecordLaunch(AppEntry e)
+        {
+            if (e == null) return;
+            string key = KeyOf(e);
+            if (key.Length == 0) return;
+
+            lock (_useSync)
+            {
+                int c;
+                _useCount.TryGetValue(key, out c);
+                _useCount[key] = c + 1;
+                _useLast[key] = DateTime.UtcNow.Ticks;
+            }
+            // 空查询的结果依赖使用次数，缓存必须失效
+            lock (_sync) { _queryCache.Clear(); }
+
+            ThreadPool.QueueUserWorkItem(delegate { SaveHistory(); });
+        }
+
+        private void SaveHistory()
+        {
+            if (string.IsNullOrEmpty(_historyPath)) return;
+            try
+            {
+                var lines = new List<string>(64);
+                lock (_useSync)
+                {
+                    foreach (KeyValuePair<string, int> kv in _useCount)
+                    {
+                        long last;
+                        _useLast.TryGetValue(kv.Key, out last);
+                        lines.Add(kv.Value.ToString(CultureInfo.InvariantCulture) + "\t"
+                                  + last.ToString(CultureInfo.InvariantCulture) + "\t" + kv.Key);
+                    }
+                }
+                if (lines.Count > 400) lines.RemoveRange(400, lines.Count - 400);
+                Directory.CreateDirectory(Program.InstallDir);
+                File.WriteAllLines(_historyPath, lines.ToArray(), new UTF8Encoding(false));
+            }
+            catch (Exception ex) { AppLog.W("写使用记录失败: " + ex.Message); }
         }
 
         public void Start()
@@ -1025,8 +1150,28 @@ namespace QuickStart
             string q = (text ?? "").Trim().ToLowerInvariant();
             if (q.Length == 0)
             {
-                for (int i = 0; i < all.Count && result.Count < limit; i++)
-                    if (!all[i].Ignore && all[i].Rank < 2) result.Add(all[i]);
+                // 空查询 = 常用列表：用过的按次数降序（次数相同看最近一次），
+                // 没用过的按名字排在后面补满，避免刚装好时列表是空的。
+                var used = new List<AppEntry>(32);
+                var rest = new List<AppEntry>(256);
+                for (int i = 0; i < all.Count; i++)
+                {
+                    AppEntry e = all[i];
+                    if (e.Ignore || e.Rank >= 2) continue;
+                    if (UseCount(e) > 0) used.Add(e); else rest.Add(e);
+                }
+
+                used.Sort(delegate (AppEntry a, AppEntry b)
+                {
+                    int ca = UseCount(a), cb = UseCount(b);
+                    if (ca != cb) return cb.CompareTo(ca);
+                    long la = UseLast(a), lb = UseLast(b);
+                    if (la != lb) return lb.CompareTo(la);
+                    return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
+                });
+
+                for (int i = 0; i < used.Count && result.Count < limit; i++) result.Add(used[i]);
+                for (int i = 0; i < rest.Count && result.Count < limit; i++) result.Add(rest[i]);
                 return result;
             }
 
@@ -1054,6 +1199,8 @@ namespace QuickStart
             hits.Sort(delegate (KeyValuePair<int, AppEntry> a, KeyValuePair<int, AppEntry> b)
             {
                 if (a.Key != b.Key) return b.Key.CompareTo(a.Key);
+                int ua = UseCount(a.Value), ub = UseCount(b.Value);
+                if (ua != ub) return ub.CompareTo(ua);      // 同分时常用的排前面
                 return string.Compare(a.Value.Name, b.Value.Name, StringComparison.CurrentCultureIgnoreCase);
             });
 
@@ -1314,6 +1461,7 @@ namespace QuickStart
             if (Visible && !_closing)
             {
                 Native.ForceForeground(Handle);
+                Native.KeepTopMost(Handle);
                 _box.Focus();
                 _box.SelectAll();
                 return;
@@ -1392,6 +1540,7 @@ namespace QuickStart
 
             Show();
             Native.ForceForeground(Handle);
+            Native.KeepTopMost(Handle);
             Activate();
             _box.Focus();
             _box.SelectionStart = 0;
@@ -1556,6 +1705,7 @@ namespace QuickStart
             if (_selected < 0 || _selected >= _results.Count) return;
             AppEntry e = _results[_selected];
             HideLauncher();
+            _host.Index.RecordLaunch(e);      // 记一次使用，供下次"常用"排序
             Launch.Execute(e);
         }
 
@@ -2451,6 +2601,7 @@ namespace QuickStart
             RegisterHotkey();
             BuildTray();
 
+            Index.LoadHistory(Program.HistoryPath);
             Index.Completed += OnIndexCompleted;
             Rebuild();
 
