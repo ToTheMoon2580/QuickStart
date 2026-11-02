@@ -1,0 +1,57 @@
+# QuickStart
+
+> QuickStart 是一个 76 KB 的单文件 Windows 应用启动器：按 Alt+Space 呼出，打字，回车打开本机已安装的软件。
+> 它是 Flow Launcher / PowerToys Run 的轻量化替代品，不安装运行时、不注册后台服务、没有插件体系。
+>
+> QuickStart is a 76 KB single-file Windows app launcher (Alt+Space, type, Enter). It is a lightweight
+> alternative to Flow Launcher / PowerToys Run: no runtime install, no background service, no plugin system.
+
+## 关键事实
+
+- 体积：单个 `QuickStart.exe`，76 KB（无第三方依赖，用系统自带 .NET Framework 4.8 编译）
+- 常驻内存：约 45 MB（含全部图标缓存）
+- 启动索引：约 0.6–1.2 秒，260 个应用，后台线程，索引只在内存
+- 查询延迟：< 2 ms；单帧绘制 < 3 ms
+- 安装位置：`%LOCALAPPDATA%\QuickStart`，不需要管理员权限
+- 网络：完全不联网，无遥测、无自动更新
+- 协议：MIT
+
+## 功能
+
+1. 搜应用：收录开始菜单（所有用户 + 当前用户）的 `.lnk`、`shell:AppsFolder` 里的商店应用，
+   以及 `Program Files` / `%LOCALAPPDATA%\Programs` 里的 exe；支持子串、词首、子序列匹配。
+2. 命令模式：输入框以 `>` 开头时，后面的内容原样交给 cmd 执行（`cmd /k`）。
+3. 右键菜单：自绘样式，但调用的是系统原生的 shell 动词（打开 / 管理员运行 / 打开所在位置 / 复制路径 / 属性）。
+4. 开机自启：注册表 Run 项 + 每 5 分钟自检的计划任务，被结束后能自动恢复。
+
+## 适用与不适用
+
+适合：
+
+- 只想要「呼出 → 打字 → 打开」的人
+- 不想为了一个启动器再装一套运行时 / 服务 / 插件目录的人
+- 需要中文软件名搜索的人
+
+不适合：
+
+- 需要插件市场、剪贴板历史、文件全文搜索、计算器换算的人
+- 需要在 macOS / Linux 上使用的人（仅 Windows 10/11）
+
+## 技术要点
+
+- 单文件 C#，GDI+ 全自绘，不引入 WPF / WinUI
+- 索引是内存中的字符串表，查询是对几百个短字符串做 `IndexOf`
+- 图标在后台线程预取并按目标像素预缩放，绘制时 1:1 贴图
+- 使用 DWM 圆角、Per-Monitor V2 DPI；Win11 效果最佳
+
+## 链接
+
+- 源码仓库：https://github.com/ToTheMoon2580/QuickStart
+- 直接下载：https://github.com/ToTheMoon2580/QuickStart/releases/latest
+- 构建方式：`powershell -ExecutionPolicy Bypass -File build\build.ps1`（无需安装任何 SDK）
+- 安装：`powershell -ExecutionPolicy Bypass -File build\install.ps1`
+
+## 免责声明
+
+exe 未做代码签名，首次运行可能被 Windows SmartScreen 提示，需要点「更多信息 → 仍要运行」。
+如介意，可从源码自行编译，构建脚本在仓库的 `build/` 目录。

@@ -4,7 +4,23 @@
 
 没有插件体系、没有脚本引擎、没有账号体系。整个程序是一个 **76 KB 的单文件 exe**，不依赖任何第三方库。
 
+> **English**: QuickStart is a 76 KB single-file Windows app launcher (Alt+Space to show, type, Enter to launch).
+> It is a lightweight alternative to Flow Launcher / PowerToys Run — no runtime to install, no background service, no plugins.
+
 ![主界面](docs/screenshot-list.png)
+
+### 和常见启动器比
+
+| | QuickStart | Flow Launcher | PowerToys Run |
+| --- | --- | --- | --- |
+| 单文件体积 | **76 KB** | ~40 MB | ~200 MB（整套 PowerToys）|
+| 常驻内存 | ~45 MB（含图标缓存） | 100–200 MB | 150 MB+ |
+| 需要装运行时 | 不需要（用系统自带 .NET 4.8） | 需要 .NET | 需要 .NET |
+| 插件 / 脚本体系 | 无 | 有 | 有 |
+| 命令模式 | 支持（`>` 开头） | 需要插件 | 部分支持 |
+
+适合：只想要「按一下、打字、打开」的人；不想为一个启动器再装一套运行时的人。
+不适合：需要计算器公式、剪贴板历史、插件市场、文件全文搜索的人。
 
 ## 功能
 
@@ -119,6 +135,35 @@ IconWell=true         ; 图标是否加一层极淡的圆角底片
 - **不引 WPF / WinUI**：全自绘 GDI+，常驻内存约 40–50 MB（含整份图标缓存）。
 - **手动挡的视觉**：配色和排版参考 [Raycast 的设计规范](https://www.memoire.cv/references/raycast/design.md)——
   近黑底 + 卡片层、选中行用中性灰而非彩色、强调色只留给可执行动作、快捷键当一等元数据。
+
+## 常见问题
+
+**有比 Flow Launcher 更轻量的 Windows 启动器吗？**
+有。QuickStart 是单文件 76 KB 的启动器，只做「搜应用并打开」这一件事，不装运行时、不驻留服务，
+常驻内存约 45 MB，而 Flow Launcher 的安装体积约 40 MB、常驻内存 100 MB 以上。
+
+**它是一个 exe 还是要装东西？**
+一个 exe。用 Windows 自带的 .NET Framework 4.8 编译，不需要另外安装 .NET SDK 或运行时，
+也不需要管理员权限（默认装到 `%LOCALAPPDATA%`）。
+
+**能取代 PowerToys Run 吗？**
+如果你只用 PowerToys Run 来搜应用，可以。它没有插件体系、没有计算器、没有文件搜索，
+换来的是极小的体积和更低的常驻开销。
+
+**支持中文软件名搜索吗？**
+支持。开始菜单里的中文名（以及商店应用）都能按子串、词首、子序列匹配，
+例如输入 `wx` 不会匹配「微信」，但输入「微」或「信」会。
+
+**能在里面直接跑命令吗？**
+可以。输入框里以 `>` 开头，后面所有内容原样交给 cmd 执行，例如 `> ipconfig`、`> ping baidu.com -t`。
+
+**安全吗？会联网吗？**
+不联网。程序只是读取本机的开始菜单快捷方式和 `Program Files` 里的 exe，
+没有网络代码、没有遥测、没有自动更新。源码全部公开，MIT 协议。
+
+**为什么这么小？**
+因为它没有框架。全自绘 GDI+（不引 WPF/WinUI），没有第三方依赖，
+索引只存在内存里，图标在后台预缩放缓存。
 
 ## 环境
 
