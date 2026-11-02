@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile with the built-in csc (no SDK required)
+        shell: pwsh
+        run: |
+          $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          if (-not (Test-Path $csc)) { throw 'csc.exe not found' }
+          & $csc /nologo /target:winexe /optimize+ /platform:anycpu /codepage:65001 `
+            /win32icon:src\app.ico `
+            /reference:System.dll /reference:System.Core.dll `
+            /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
+            /out:QuickStart.exe src\QuickStart.cs
+          if ($LASTEXITCODE -ne 0) { throw "compile failed: $LASTEXITCODE" }
+          $f = Get-Item QuickStart.exe
+          Write-Host ("built QuickStart.exe: {0:N0} bytes" -f $f.Length)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuickStart-exe
+          path: QuickStart.exe
+
+      - name: Attach exe to the release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: QuickStart.exe
+          generate_release_notes: true
