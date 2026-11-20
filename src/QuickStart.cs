@@ -8,9 +8,12 @@
 //       /out:QuickStart.exe QuickStart.cs
 //
 // 设计取舍：
-//   * 索引是内存位图（开始菜单 + shell:AppsFolder + Program Files），一次约 100-400ms，
+//   * 索引是内存位图（开始菜单 + shell:AppsFolder + 「程序和功能」注册表里登记过的已安装程序
+//     + Program Files + config.ini 的 ScanRoots），一次约 100-400ms，
 //     之后每次查询只是对几百个短字符串做 IndexOf，微秒级，输入零延迟。
 //     （不读 Everything 那样的全盘 MFT，因为用户只要"应用"，不需要文件。）
+//   * 注册表这一路是必须的：装在 D:\ 之类非标准目录、又没建开始菜单快捷方式的软件，
+//     只有 Uninstall 项能证明它存在（本机 SnowLeopard Vision 就是这么被漏掉的）。
 //   * 不引 WPF / WinUI：常驻内存约 10-20MB，开机不加载 XAML、不建 D3D 设备。
 //   * 常驻进程 = 一个隐藏的 NativeWindow + 托盘图标，没有窗口时不占 CPU。
 //   * 不落盘缓存，程序启动后立刻在后台重建 → 新装的软件不需要任何"刷新"就能搜到。
@@ -32,8 +35,8 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyTitle("QuickStart")]
 [assembly: System.Reflection.AssemblyDescription("极简应用启动器 Alt+Space")]
 [assembly: System.Reflection.AssemblyProduct("QuickStart")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.3.0.0")]
 
 namespace QuickStart
 {
@@ -67,6 +70,13 @@ namespace QuickStart
                 else if (a == "--nostartup") return Cli.SetStartup(false);
                 else if (a == "--status") return Cli.Status();
                 else if (a == "--quit") return Cli.Quit();
+                else if (a == "--find")
+                {
+                    // --find <关键词>：强制同步重建索引并写出匹配结果，用来查「为什么搜不到某个软件」
+                    string q = "";
+                    for (int j = i + 1; j < args.Length; j++) q += (q.Length > 0 ? " " : "") + args[j];
+                    return Cli.Find(q);
+                }
                 else if (a == "--task") return Cli.InstallTask();
                 else if (a == "--untask") return Cli.RemoveTask();
             }
@@ -134,6 +144,7 @@ namespace QuickStart
         public bool ScanProgramFiles = true;
         public bool IconWell = false;
         public int IconSize = 13;      // 图标边长（逻辑像素）
+        public string[] ScanRoots = new string[0];   // 额外扫描目录（绿色软件）
 
         private const string Template =
             "# QuickStart 配置\r\n" +
@@ -155,6 +166,10 @@ namespace QuickStart
             "\r\n" +
             "# 是否扫描 Program Files 中的 exe（关掉可以再快一点，但绿色软件会搜不到）\r\n" +
             "ScanProgramFiles=true\r\n" +
+            "\r\n" +
+            "# 额外扫描目录（可选）：绿色软件 / 免安装程序放这些目录里也能被搜到\r\n" +
+            "# 多个目录用分号分隔，支持环境变量，例如：ScanRoots=D:\\Software;D:\\Tools;%USERPROFILE%\\Apps\r\n" +
+            "ScanRoots=\r\n" +
             "\r\n" +
             "# 图标是否加一层极淡的圆角底片（让形状各异的图标看起来更整齐；true/false）\r\n" +
             "IconWell=false\r\n" +
@@ -196,6 +211,21 @@ namespace QuickStart
                             break;
                         case "matchpath": c.MatchPath = Truthy(v); break;
                         case "scanprogramfiles": c.ScanProgramFiles = Truthy(v); break;
+                        case "scanroots":
+                            {
+                                var roots = new List<string>();
+                                foreach (string part in v.Split(new[] { ';', '|' }, StringSplitOptions.RemoveEmptyEntries))
+                                {
+                                    string dirPath = part.Trim().Trim('"');
+                                    if (dirPath.Length == 0) continue;
+                                    try { dirPath = Environment.ExpandEnvironmentVariables(dirPath).TrimEnd('\\'); }
+                                    catch { }
+                                    if (dirPath.Length == 0 || !Directory.Exists(dirPath)) continue;
+                                    roots.Add(dirPath);
+                                }
+                                c.ScanRoots = roots.ToArray();
+                            }
+                            break;
                         case "iconwell": c.IconWell = Truthy(v); break;
                         case "iconsize":
                             int sz;
@@ -266,6 +296,7 @@ namespace QuickStart
     {
         public const int WM_HOTKEY = 0x0312;
         public const int WM_QS_TOGGLE = 0x8001;
+        public const int WM_QS_QUIT = 0x8002;
         public const int WM_ERASEBKGND = 0x0014;
         public const int WM_NCHITTEST = 0x0084;
         public const int WM_CLOSE = 0x0010;
@@ -866,6 +897,13 @@ namespace QuickStart
             catch (Exception ex) { AppLog.W("写使用记录失败: " + ex.Message); }
         }
 
+        /// <summary>同步建索引：只给命令行自检（--find）用，界面路径永远走后台线程。</summary>
+        public void BuildNow()
+        {
+            Build();
+            _ready = true;
+        }
+
         public void Start()
         {
             if (_worker != null && _worker.IsAlive) return;
@@ -896,6 +934,8 @@ namespace QuickStart
             long t1 = sw.ElapsedMilliseconds;
             AddAppsFolder(list, seen, byName);
             long t2 = sw.ElapsedMilliseconds;
+            int installed = AddInstalledApps(list, seen, byName);
+            long t3 = sw.ElapsedMilliseconds;
 
             if (Program.Cfg.ScanProgramFiles)
             {
@@ -906,6 +946,14 @@ namespace QuickStart
                     try { AddExes(root, 0, 2, list, seen, byName); }
                     catch (Exception ex) { AppLog.W("扫描 " + root + ": " + ex.Message); }
                 }
+            }
+
+            // 绿色软件 / 装在非标准目录的软件：由 config.ini 的 ScanRoots 指定
+            for (int i = 0; i < Program.Cfg.ScanRoots.Length; i++)
+            {
+                string root = Program.Cfg.ScanRoots[i];
+                try { AddExes(root, 0, 2, list, seen, byName); }
+                catch (Exception ex) { AppLog.W("扫描 " + root + ": " + ex.Message); }
             }
 
             list.Sort(delegate (AppEntry a, AppEntry b)
@@ -919,8 +967,8 @@ namespace QuickStart
                 _entries = list;
                 _queryCache.Clear();
             }
-            AppLog.W(string.Format("索引 {0} 项，总 {1}ms（开始菜单 {2}ms，AppsFolder {3}ms）",
-                list.Count, sw.ElapsedMilliseconds, t1, t2 - t1));
+            AppLog.W(string.Format("索引 {0} 项，总 {1}ms（开始菜单 {2}ms，AppsFolder {3}ms，已安装程序 +{4} 用时 {5}ms）",
+                list.Count, sw.ElapsedMilliseconds, t1, t2 - t1, installed, t3 - t2));
         }
 
         private static bool JunkName(string name)
@@ -937,6 +985,130 @@ namespace QuickStart
                 || n.IndexOf("website", StringComparison.Ordinal) >= 0
                 || n.IndexOf("changelog", StringComparison.Ordinal) >= 0
                 || n.IndexOf("license", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>安装器 / 更新器 / 服务 / 崩溃上报这类 exe 不是用户想「打开」的东西。</summary>
+        private static bool RejectExeName(string baseName)
+        {
+            if (string.IsNullOrEmpty(baseName)) return true;
+            string n = baseName.ToLowerInvariant();
+            return n.StartsWith("unins", StringComparison.Ordinal)
+                || n.StartsWith("setup", StringComparison.Ordinal)
+                || n.StartsWith("update", StringComparison.Ordinal)
+                || n.StartsWith("vc_redist", StringComparison.Ordinal)
+                || n.StartsWith("crash", StringComparison.Ordinal)
+                || n.StartsWith("helper", StringComparison.Ordinal)
+                || n.StartsWith("elevate", StringComparison.Ordinal)
+                || n.StartsWith("dllhost", StringComparison.Ordinal)
+                || n.EndsWith("service", StringComparison.Ordinal)
+                || n.EndsWith("svc", StringComparison.Ordinal)
+                || n.EndsWith("updater", StringComparison.Ordinal);
+        }
+
+        /// <summary>「程序和功能」里大量是运行库 / 补丁，启动器里没有意义。</summary>
+        private static bool NoisyInstalledName(string displayName)
+        {
+            string n = displayName.ToLowerInvariant();
+            return n.IndexOf("redistributable", StringComparison.Ordinal) >= 0
+                || n.IndexOf("visual c++", StringComparison.Ordinal) >= 0
+                || n.IndexOf(".net framework", StringComparison.Ordinal) >= 0
+                || n.IndexOf("update for", StringComparison.Ordinal) >= 0
+                || n.IndexOf("运行库", StringComparison.Ordinal) >= 0
+                || n.IndexOf("安全更新", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>
+        /// 注册表里指到的 exe 能不能当作「软件本体」打开：
+        /// 卸载器 / 安装包（Package Cache 里的 vcredist、python-amd64 等）/ 系统组件都不算。
+        /// </summary>
+        private static bool BadInstalledExePath(string exe)
+        {
+            if (string.IsNullOrEmpty(exe)) return true;
+
+            string low = exe.ToLowerInvariant();
+            if (low.IndexOf("\\package cache\\", StringComparison.Ordinal) >= 0) return true;
+            if (low.IndexOf("\\temp\\", StringComparison.Ordinal) >= 0) return true;
+            if (low.IndexOf("\\windows\\system32\\", StringComparison.Ordinal) >= 0) return true;
+            if (low.IndexOf("\\windows\\syswow64\\", StringComparison.Ordinal) >= 0) return true;
+            if (low.IndexOf("\\windows\\installer\\", StringComparison.Ordinal) >= 0) return true;
+            if (low.IndexOf("\\windows\\winsxs\\", StringComparison.Ordinal) >= 0) return true;
+
+            string baseName = null;
+            try { baseName = Path.GetFileNameWithoutExtension(exe); } catch { }
+            if (string.IsNullOrEmpty(baseName)) return true;
+            if (JunkName(baseName) || RejectExeName(baseName)) return true;
+
+            string n = baseName.ToLowerInvariant();
+            return n.IndexOf("setup", StringComparison.Ordinal) >= 0
+                || n.IndexOf("install", StringComparison.Ordinal) >= 0
+                || n.IndexOf("update", StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>去掉「程序和功能」里常见的版本尾巴："LocalSend 版本 1.17.0" → "LocalSend"，"7-Zip 24.08" → "7-Zip"。</summary>
+        private static string CleanDisplayName(string raw)
+        {
+            string s = (raw ?? "").Trim();
+            for (int guard = 0; guard < 3; guard++)
+            {
+                string next = StripVersionTail(s);
+                if (next.Length < 2 || next == s) break;
+                s = next;
+            }
+            return s;
+        }
+
+        private static string StripVersionTail(string s)
+        {
+            // 1) 显式的「版本 / version」标记之后全是版本号
+            string[] marks = { " 版本", " version", " Version", " VERSION" };
+            for (int i = 0; i < marks.Length; i++)
+            {
+                int at = s.LastIndexOf(marks[i], StringComparison.OrdinalIgnoreCase);
+                if (at > 1)
+                {
+                    string head = s.Substring(0, at).Trim();
+                    if (head.Length >= 2) s = head;
+                    break;
+                }
+            }
+
+            // 2) 结尾的裸版本号："Qoder 0.4.8"、"Notepad++ v8.6"、"24.08"
+            int sp = s.LastIndexOf(' ');
+            if (sp > 2)
+            {
+                string tail = s.Substring(sp + 1);
+                if (tail.Length > 1 && (tail[0] == 'v' || tail[0] == 'V')) tail = tail.Substring(1);
+                if (tail.Length > 0 && char.IsDigit(tail[0]) && IsVersionText(tail))
+                {
+                    string head = s.Substring(0, sp).Trim();
+                    if (head.Length >= 2) s = head;
+                }
+            }
+            return s;
+        }
+
+        private static bool IsVersionText(string s)
+        {
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (!(char.IsDigit(c) || c == '.' || c == '-' || c == '_')) return false;
+            }
+            return true;
+        }
+
+        /// <summary>注册表的名字和开始菜单里已有的条目其实是同一个软件（"PotPlayer-64 bit" / "PotPlayer 64 bit"）就别再加一遍。</summary>
+        private static bool AlreadyNamed(List<AppEntry> list, string name)
+        {
+            string want = Normalize(name);
+            if (want.Length == 0) return false;
+            for (int i = 0; i < list.Count; i++)
+            {
+                AppEntry e = list[i];
+                if (e.Rank == 2) continue;        // 目录扫描出来的名字毛糙，不用它挡注册表
+                if (Normalize(e.Name) == want) return true;
+            }
+            return false;
         }
 
         private static void AddStartMenu(List<AppEntry> list, HashSet<string> seen, Dictionary<string, int> byName)
@@ -1009,12 +1181,7 @@ namespace QuickStart
             {
                 string name = Path.GetFileNameWithoutExtension(f);
                 if (string.IsNullOrWhiteSpace(name) || JunkName(name)) continue;
-
-                string low = name.ToLowerInvariant();
-                if (low.StartsWith("unins") || low.StartsWith("setup") || low.StartsWith("update") ||
-                    low.StartsWith("vc_redist") || low.StartsWith("crash") || low.StartsWith("helper") ||
-                    low.StartsWith("elevate") || low.StartsWith("dllhost") || low.EndsWith("service") ||
-                    low.EndsWith("svc") || low.EndsWith("updater")) continue;
+                if (RejectExeName(name)) continue;
 
                 var e = new AppEntry();
                 e.Name = name;
@@ -1094,6 +1261,194 @@ namespace QuickStart
                 if (folder != null) { try { Marshal.ReleaseComObject(folder); } catch { } }
                 if (shell != null) { try { Marshal.ReleaseComObject(shell); } catch { } }
             }
+        }
+
+        // ------------------------------------------------- 已安装程序（注册表 Uninstall 项）
+
+        /// <summary>
+        /// 从「程序和功能」的注册表登记里取已安装软件。
+        /// 这是装在非标准目录（D:\Software 之类）又没有开始菜单快捷方式的软件唯一的线索，
+        /// 只读 DisplayIcon / InstallLocation / UninstallString，不做任何写操作。
+        /// </summary>
+        private static int AddInstalledApps(List<AppEntry> list, HashSet<string> seen, Dictionary<string, int> byName)
+        {
+            int before = list.Count;
+
+            for (int i = 0; i < 3; i++)
+            {
+                RegistryKey hive = i < 2 ? Registry.LocalMachine : Registry.CurrentUser;
+                string path = i == 1
+                    ? @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+                    : @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+
+                RegistryKey root = null;
+                try
+                {
+                    root = hive.OpenSubKey(path);
+                    if (root == null) continue;
+
+                    string[] subs = root.GetSubKeyNames();
+                    for (int j = 0; j < subs.Length; j++)
+                    {
+                        RegistryKey k = null;
+                        try
+                        {
+                            k = root.OpenSubKey(subs[j]);
+                            if (k == null) continue;
+
+                            string name = CleanDisplayName((k.GetValue("DisplayName") as string) ?? "");
+                            if (name.Length == 0 || JunkName(name) || NoisyInstalledName(name)) continue;
+                            if (AlreadyNamed(list, name)) continue;
+                            if (IsFlagged(k, "SystemComponent")) continue;
+                            if ((((k.GetValue("ParentKeyName") as string) ?? "").Length) > 0) continue;   // 补丁/子项
+
+                            string rt = (((k.GetValue("ReleaseType") as string) ?? "").Trim().ToLowerInvariant());
+                            if (rt == "update" || rt == "hotfix" || rt == "security update" || rt == "servicepack") continue;
+
+                            string exe = ResolveInstalledExe(k, name);
+                            if (exe == null) continue;
+
+                            var e = new AppEntry();
+                            e.Name = name;
+                            e.Target = exe;
+                            e.WorkDir = Path.GetDirectoryName(exe);
+                            e.IconKey = exe;
+                            e.Rank = 2;                       // 与目录扫描同级：不出现在「常用」首屏，但能被搜到
+                            Add(e, list, seen, byName, "f:" + exe.ToLowerInvariant());
+                        }
+                        catch { }                              // 单个键坏了不影响整体
+                        finally { if (k != null) { try { k.Close(); } catch { } } }
+                    }
+                }
+                catch (Exception ex) { AppLog.W("注册表索引 " + path + ": " + ex.Message); }
+                finally { if (root != null) { try { root.Close(); } catch { } } }
+            }
+
+            return list.Count - before;
+        }
+
+        private static bool IsFlagged(RegistryKey k, string valueName)
+        {
+            object v = k.GetValue(valueName);
+            if (v == null) return false;
+            string s = v.ToString().Trim();
+            return s == "1" || s.Equals("true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>按 DisplayIcon → InstallLocation → UninstallString 的顺序找主程序 exe。</summary>
+        private static string ResolveInstalledExe(RegistryKey k, string displayName)
+        {
+            // 1) DisplayIcon：绝大多数安装包都写了主程序路径，可能带 ,0 这样的图标序号
+            string exe = CleanExePath(k.GetValue("DisplayIcon") as string);
+            if (exe != null && File.Exists(exe) && !BadInstalledExePath(exe)) return exe;
+
+            // 2) InstallLocation：目录里挑一个和显示名最像的 exe
+            string loc = ((k.GetValue("InstallLocation") as string) ?? "").Trim();
+            if (loc.Length > 0)
+            {
+                exe = PickExe(loc, displayName);
+                if (exe != null) return exe;
+            }
+
+            // 3) UninstallString 一般就躺在安装目录里
+            string uninstaller = CleanExePath(k.GetValue("UninstallString") as string);
+            if (uninstaller != null)
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(uninstaller);
+                    if (dir != null && dir.Length > 0)
+                    {
+                        exe = PickExe(dir, displayName);
+                        if (exe != null) return exe;
+                    }
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        /// <summary>把注册表里的可执行路径洗干净：'C:\a b\app.exe,0' 与 '"C:\a b\app.exe" --x' 都还原成 exe 路径。</summary>
+        private static string CleanExePath(string raw)
+        {
+            if (raw == null) return null;
+            string s = raw.Trim();
+            if (s.Length == 0) return null;
+
+            try { s = Environment.ExpandEnvironmentVariables(s); } catch { }
+
+            if (s[0] == '"')
+            {
+                int close = s.IndexOf('"', 1);
+                s = close > 1 ? s.Substring(1, close - 1) : s.Trim('"');
+            }
+            else
+            {
+                // 没引号时后面可能跟着 ",0" 或命令行参数，截到第一个 .exe 为止
+                int cut = s.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+                if (cut > 0) s = s.Substring(0, cut + 4);
+            }
+
+            s = s.Trim().TrimEnd(',', '\\');
+            if (s.Length == 0 || !s.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return null;
+            return s;
+        }
+
+        /// <summary>在目录里挑主程序：名字和显示名对得上的优先，否则只在候选唯一时采用。</summary>
+        private static string PickExe(string dir, string displayName)
+        {
+            try
+            {
+                dir = Environment.ExpandEnvironmentVariables(dir.Trim().Trim('"').TrimEnd('\\'));
+                if (dir.Length == 0 || !Directory.Exists(dir)) return null;
+
+                string[] files = Directory.GetFiles(dir, "*.exe");
+                if (files.Length == 0) return null;
+
+                string want = Normalize(displayName);
+                string named = null;
+                string only = null;
+                int candidates = 0;
+
+                for (int i = 0; i < files.Length; i++)
+                {
+                    string baseName = Path.GetFileNameWithoutExtension(files[i]);
+                    if (BadInstalledExePath(files[i])) continue;
+
+                    candidates++;
+                    if (candidates == 1) only = files[i];
+                    if (named == null && NameMatches(Normalize(baseName), want)) named = files[i];
+                }
+
+                if (named != null) return named;
+                return candidates == 1 ? only : null;
+            }
+            catch { return null; }
+        }
+
+        private static bool NameMatches(string have, string want)
+        {
+            if (have.Length == 0 || want.Length == 0) return false;
+            if (have == want) return true;
+            if (have.Length < 3 || want.Length < 3) return false;   // 太短的名字容易误配
+            return have.StartsWith(want, StringComparison.Ordinal)
+                || want.StartsWith(have, StringComparison.Ordinal)
+                || have.IndexOf(want, StringComparison.Ordinal) >= 0
+                || want.IndexOf(have, StringComparison.Ordinal) >= 0;
+        }
+
+        /// <summary>去掉空格与标点后用于比较："SnowLeopard Vision" ↔ "SnowLeopardVision.exe"。</summary>
+        private static string Normalize(string s)
+        {
+            if (s == null) return "";
+            var sb = new StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (char.IsLetterOrDigit(c)) sb.Append(char.ToLowerInvariant(c));
+            }
+            return sb.ToString();
         }
 
         private static void Add(AppEntry e, List<AppEntry> list, HashSet<string> seen, Dictionary<string, int> byName, string key)
@@ -2670,13 +3025,17 @@ namespace QuickStart
                 Boot.Uninstall();
                 Application.Exit();
             });
-            menu.Items.Add("退出", null, delegate
-            {
-                Exiting = true;
-                _tray.Visible = false;
-                Application.Exit();
-            });
+            menu.Items.Add("退出", null, delegate { ExitApp("托盘菜单"); });
             menu.Show(Cursor.Position);
+        }
+
+        /// <summary>真正的退出入口：托盘菜单和 --quit 都走这里。</summary>
+        public void ExitApp(string reason)
+        {
+            AppLog.W("退出（" + reason + "）");
+            Exiting = true;
+            try { if (_tray != null) _tray.Visible = false; } catch { }
+            Application.Exit();
         }
 
         public void OnLauncherClosed()
@@ -2779,6 +3138,7 @@ namespace QuickStart
         {
             if (m.Msg == Native.WM_HOTKEY && (int)m.WParam == 1) { Ui.Toggle(); m.Result = IntPtr.Zero; return; }
             if (m.Msg == Native.WM_QS_TOGGLE) { Ui.Toggle(); m.Result = IntPtr.Zero; return; }
+            if (m.Msg == Native.WM_QS_QUIT) { ExitApp("--quit"); m.Result = IntPtr.Zero; return; }
             if (m.Msg == Native.WM_CLOSE)
             {
                 // 只记录，不退出：某些清理工具会向所有顶层窗口发 WM_CLOSE，
@@ -2991,12 +3351,54 @@ namespace QuickStart
             return 0;
         }
 
+        /// <summary>
+        /// --find &lt;关键词&gt;：同步重建一次索引，把匹配结果连同全部条目写进 find.txt。
+        /// 界面上搜不到某个软件时用它一眼分清是「根本没索引到」还是「被同名条目顶掉了」。
+        /// </summary>
+        public static int Find(string query)
+        {
+            AttachForOutput();
+
+            var idx = new AppIndex();
+            idx.LoadHistory(Program.HistoryPath);
+
+            var sw = Stopwatch.StartNew();
+            idx.BuildNow();
+            long build = sw.ElapsedMilliseconds;
+
+            List<AppEntry> hits = idx.Query(query ?? "", 20);
+            List<AppEntry> all = idx.Snapshot();
+
+            var sb = new StringBuilder();
+            sb.AppendLine("查询 : " + query);
+            sb.AppendLine("索引 : " + all.Count + " 项，构建 " + build + "ms");
+            sb.AppendLine();
+            sb.AppendLine("匹配 " + hits.Count + " 条：");
+            for (int i = 0; i < hits.Count; i++) sb.AppendLine("  [" + hits[i].Rank + "] " + hits[i].Name + "  ->  " + hits[i].Target);
+            sb.AppendLine();
+            sb.AppendLine("—— 全部条目 ——");
+            for (int i = 0; i < all.Count; i++) sb.AppendLine("  [" + all[i].Rank + "] " + all[i].Name + "  ->  " + all[i].Target);
+
+            string file = Path.Combine(Program.InstallDir, "find.txt");
+            try
+            {
+                Directory.CreateDirectory(Program.InstallDir);
+                File.WriteAllText(file, sb.ToString(), new UTF8Encoding(false));
+                Console.WriteLine("匹配 " + hits.Count + " 条 / 索引 " + all.Count + " 项（" + build + "ms），结果已写入: " + file);
+            }
+            catch (Exception ex) { Console.WriteLine("写结果失败: " + ex.Message); }
+
+            for (int i = 0; i < hits.Count && i < 10; i++)
+                Console.WriteLine("  " + hits[i].Name + "  ->  " + hits[i].Target);
+            return 0;
+        }
+
         public static int Quit()
         {
             AttachForOutput();
             IntPtr h = Native.FindWindow(null, HostWindow.WindowTitle);
             if (h == IntPtr.Zero) { Console.WriteLine("未在运行"); return 1; }
-            Native.PostMessage(h, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            Native.PostMessage(h, Native.WM_QS_QUIT, IntPtr.Zero, IntPtr.Zero);
             Console.WriteLine("已请求退出");
             return 0;
         }

@@ -37,7 +37,7 @@ if ($NoStartup) {
 } else {
     & (Join-Path $target 'QuickStart.exe') --startup | Out-Null
     & (Join-Path $target 'QuickStart.exe') --task | Out-Null
-    Write-Output 'autostart : HKCU Run + 5-minute self-heal task'
+    Write-Output 'autostart : HKCU Run + 2-minute self-heal task'
 }
 
 # Make it findable from Windows Search / Start menu / Win+R

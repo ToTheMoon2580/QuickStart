@@ -2,9 +2,9 @@
 
 一个只用来看「有什么软件、按一下就打开」的 Windows 启动器。**Alt + 空格** 呼出，打字，回车打开。
 
-没有插件体系、没有脚本引擎、没有账号体系。整个程序是一个 **76 KB 的单文件 exe**，不依赖任何第三方库。
+没有插件体系、没有脚本引擎、没有账号体系。整个程序是一个 **84 KB 的单文件 exe**，不依赖任何第三方库。
 
-> **English**: QuickStart is a 76 KB single-file Windows app launcher (Alt+Space to show, type, Enter to launch).
+> **English**: QuickStart is a 84 KB single-file Windows app launcher (Alt+Space to show, type, Enter to launch).
 > It is a lightweight alternative to Flow Launcher / PowerToys Run — no runtime to install, no background service, no plugins.
 
 ![主界面](docs/screenshot-list.png)
@@ -13,7 +13,7 @@
 
 | | QuickStart | Flow Launcher | PowerToys Run |
 | --- | --- | --- | --- |
-| 单文件体积 | **76 KB** | ~40 MB | ~200 MB（整套 PowerToys）|
+| 单文件体积 | **84 KB** | ~40 MB | ~200 MB（整套 PowerToys）|
 | 常驻内存 | ~45 MB（含图标缓存） | 100–200 MB | 150 MB+ |
 | 需要装运行时 | 不需要（用系统自带 .NET 4.8） | 需要 .NET | 需要 .NET |
 | 插件 / 脚本体系 | 无 | 有 | 有 |
@@ -36,14 +36,15 @@
 
 ### 2. 搜应用
 
-收录范围：
+收录范围（四个来源，装在哪个盘都躲不掉）：
 
 - 开始菜单（所有用户 + 当前用户）的 `.lnk` / `.appref-ms`
 - `shell:AppsFolder` 里的商店应用（计算器、相机、日历等）
-- `C:\Program Files`、`C:\Program Files (x86)`、`%LOCALAPPDATA%\Programs` 里的 exe
+- 「程序和功能」注册表里登记过的已安装软件——装在 `D:\Software` 这类非标准目录、连开始菜单快捷方式都没有的也能搜到
+- `C:\Program Files`、`C:\Program Files (x86)`、`%LOCALAPPDATA%\Programs`，以及 `config.ini` 里 `ScanRoots` 指定的目录（绿色软件）
 
 输入即过滤，支持子串、词首、子序列匹配（`cal` → Calculator，`cg` → Character Map）。
-自动排除卸载程序、帮助文档、官网快捷方式、安装器/更新器/服务程序；同名条目只留最权威的一条。
+自动排除卸载程序、安装包、运行库、帮助文档、官网快捷方式、更新器/服务程序；同名条目只留最权威的一条。
 
 ### 3. 命令模式
 
@@ -120,6 +121,7 @@ powershell -ExecutionPolicy Bypass -File build\install.ps1
 QuickStart.exe --task     # 创建 / 重建自愈任务
 QuickStart.exe --untask   # 删除自愈任务
 QuickStart.exe --status   # 查看状态
+QuickStart.exe --find nv  # 同步重建索引并写出匹配结果到 find.txt（排查"搜不到"）
 QuickStart.exe --quit     # 退出
 ```
 
@@ -133,12 +135,13 @@ Theme=dark            ; dark | light
 WidthRatio=0.47       ; 窗口宽度占屏幕工作区比例
 MatchPath=true        ; 搜索时是否把安装路径也算关键字
 ScanProgramFiles=true ; 是否扫描 Program Files 里的 exe
+ScanRoots=            ; 额外扫描目录，绿色软件放这里（分号分隔，支持环境变量）
 IconWell=true         ; 图标是否加一层极淡的圆角底片
 ```
 
 ## 设计取舍
 
-- **索引只在内存里**：启动后后台扫一遍（约 0.6~1.2 秒），之后查询是对几百个短字符串做 `IndexOf`，
+- **索引只在内存里**：启动后后台扫一遍（约 1 秒上下，机器和商店应用数量不同会有浮动），之后查询是对几百个短字符串做 `IndexOf`，
   单次 < 2 ms。不落盘、不常驻服务。
 - **图标预热**：索引建完后在后台线程把所有图标取进内存并按目标尺寸预缩放。早期版本在
   `OnPaint` 里同步调 shell COM 取图标，每次结果变化要卡十几毫秒；现在绘制是 1:1 贴图，单帧 < 3 ms。
@@ -149,7 +152,7 @@ IconWell=true         ; 图标是否加一层极淡的圆角底片
 ## 常见问题
 
 **有比 Flow Launcher 更轻量的 Windows 启动器吗？**
-有。QuickStart 是单文件 76 KB 的启动器，只做「搜应用并打开」这一件事，不装运行时、不驻留服务，
+有。QuickStart 是单文件 84 KB 的启动器，只做「搜应用并打开」这一件事，不装运行时、不驻留服务，
 常驻内存约 45 MB，而 Flow Launcher 的安装体积约 40 MB、常驻内存 100 MB 以上。
 
 **它是一个 exe 还是要装东西？**
@@ -167,9 +170,14 @@ IconWell=true         ; 图标是否加一层极淡的圆角底片
 **能在里面直接跑命令吗？**
 可以。输入框里以 `>` 开头，后面所有内容原样交给 cmd 执行，例如 `> ipconfig`、`> ping baidu.com -t`。
 
+**装好的软件搜不到怎么办？**
+先看它有没有出现在 `QuickStart.exe --find 关键词` 写出的 `find.txt` 里：
+不在「全部条目」中说明四个来源都没登记它（绿色软件请把目录加进 `config.ini` 的 `ScanRoots`）；
+在条目里但搜不着，多半是全英文名，换个词试试（`SnowLeopard Vision` → 敲 `snow` / `leopard` / `slv`）。
+
 **安全吗？会联网吗？**
-不联网。程序只是读取本机的开始菜单快捷方式和 `Program Files` 里的 exe，
-没有网络代码、没有遥测、没有自动更新。源码全部公开，MIT 协议。
+不联网。程序只读本机的开始菜单快捷方式、`shell:AppsFolder`、「程序和功能」注册表登记（只读 DisplayName / DisplayIcon 等几个值）
+和 `Program Files` 里的 exe，没有网络代码、没有遥测、没有自动更新。源码全部公开，MIT 协议。
 
 **为什么这么小？**
 因为它没有框架。全自绘 GDI+（不引 WPF/WinUI），没有第三方依赖，
